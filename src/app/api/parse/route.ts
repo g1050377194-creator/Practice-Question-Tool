@@ -1,6 +1,7 @@
 import { itemsToPageText, pagesToDocument, type PdfTextItem } from "@/lib/pdf-layout";
 import { parseQuestionBank } from "@/lib/parse-questions";
-import type { SubjectId } from "@/lib/types";
+import { examDatabase, replaceBank } from "@/lib/server-db";
+import type { BankMeta, SubjectId } from "@/lib/types";
 import { extractTextItems } from "unpdf";
 
 export const runtime = "nodejs";
@@ -77,8 +78,25 @@ export async function POST(request: Request) {
     );
   }
 
+  const importedAt = Date.now();
+  const meta: BankMeta = {
+    subject,
+    fileName: name,
+    importedAt,
+    warnings: parsed.warnings,
+    stats: parsed.stats,
+  };
+  let persisted = true;
+  try {
+    replaceBank(examDatabase(), meta, parsed.questions);
+  } catch {
+    persisted = false;
+  }
+
   return Response.json({
     ...parsed,
     fileName: name,
+    importedAt,
+    persisted,
   });
 }

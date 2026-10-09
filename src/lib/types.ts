@@ -44,6 +44,49 @@ export type BankMeta = {
   stats: ParseStats;
 };
 
+export type PracticeSource = "bank" | "mistakes";
+
+export type MistakeEvent = {
+  selected: string;
+  createdAt: number;
+};
+
+export type MistakeRecord = {
+  question: Question;
+  wrongCount: number;
+  lastSelected: string;
+  lastWrongAt: number;
+  events: MistakeEvent[];
+};
+
+export type AttemptSummary = {
+  id: string;
+  subject: SubjectId;
+  filter: "all" | "single" | "multiple";
+  source: PracticeSource;
+  questionCount: number;
+  correctCount: number;
+  wrongCount: number;
+  ungradedCount: number;
+  startedAt: number;
+  finishedAt: number;
+};
+
+export type AttemptAnswer = {
+  questionId: string;
+  number: number;
+  type: QuestionType;
+  stem: string;
+  selected: string;
+  answer: string | null;
+  explanation: string | null;
+  verdict: "correct" | "wrong" | "ungraded";
+};
+
+export type AttemptDetail = AttemptSummary & {
+  answers: AttemptAnswer[];
+};
+
 export const SUBJECTS: {
   id: SubjectId;
   short: string;

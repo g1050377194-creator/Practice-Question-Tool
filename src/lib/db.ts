@@ -1,11 +1,13 @@
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
-import type { BankMeta, Question, SubjectId } from "@/lib/types";
+import type { BankMeta, PracticeSource, Question, SubjectId } from "@/lib/types";
 
 export type PracticeFilter = "all" | "single" | "multiple";
 
 export type PracticeSession = {
+  sessionId: string;
   subject: SubjectId;
   filter: PracticeFilter;
+  source: PracticeSource;
   limit: number | "all";
   questionIds: string[];
   selections: Record<string, string>;
@@ -69,6 +71,7 @@ export async function readBank(subject: SubjectId): Promise<{
 export async function writeBank(
   meta: BankMeta,
   questions: Question[],
+  options?: { keepSession?: boolean },
 ): Promise<void> {
   const db = await database();
   const tx = db.transaction(["questions", "meta", "session"], "readwrite");
@@ -76,8 +79,10 @@ export async function writeBank(
   await Promise.all(existing.map((key) => tx.objectStore("questions").delete(key)));
   await Promise.all(questions.map((question) => tx.objectStore("questions").put(question)));
   await tx.objectStore("meta").put(meta, meta.subject);
-  const session = await tx.objectStore("session").get("current");
-  if (session?.subject === meta.subject) await tx.objectStore("session").delete("current");
+  if (!options?.keepSession) {
+    const session = await tx.objectStore("session").get("current");
+    if (session?.subject === meta.subject) await tx.objectStore("session").delete("current");
+  }
   await tx.done;
 }
 

@@ -10,6 +10,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { HistoryPanel, MistakePanel } from "@/components/records-panels";
 import {
   clearBank,
   clearSession,
@@ -20,12 +21,16 @@ import {
   type PracticeFilter,
   type PracticeSession,
 } from "@/lib/db";
+import { gradeAnswer, type Verdict } from "@/lib/grade";
 import {
   SUBJECTS,
   subjectLabel,
   subjectShort,
+  type AttemptSummary,
   type BankMeta,
+  type MistakeRecord,
   type ParseResult,
+  type PracticeSource,
   type Question,
   type SubjectId,
 } from "@/lib/types";
@@ -72,16 +77,20 @@ function formatPercent(value: number): string {
   return Number.isInteger(rounded) ? `${rounded}%` : `${rounded.toFixed(1)}%`;
 }
 
-type Verdict = "pending" | "correct" | "wrong" | "ungraded";
-
 function verdictFor(
   question: Question,
   selected: string | undefined,
   revealed: boolean,
 ): Verdict {
-  if (!revealed) return "pending";
-  if (!question.answer) return "ungraded";
-  return selected && selected === question.answer ? "correct" : "wrong";
+  return gradeAnswer(question.answer, selected, revealed);
+}
+
+function restoreSession(saved: PracticeSession): PracticeSession {
+  return {
+    ...saved,
+    sessionId: saved.sessionId || `legacy-${saved.startedAt}`,
+    source: saved.source === "mistakes" ? "mistakes" : "bank",
+  };
 }
 
 function typeLabel(type: Question["type"]): string {
@@ -101,47 +110,115 @@ export function PracticeApp() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [memoryOnly, setMemoryOnly] = useState(false);
+  const [databaseDown, setDatabaseDown] = useState(false);
+  const [homeTab, setHomeTab] = useState<"practice" | "mistakes" | "history">("practice");
+  const [mistakes, setMistakes] = useState<Record<SubjectId, MistakeRecord[]>>({
+    civil: [],
+    management: [],
+  });
+  const [attempts, setAttempts] = useState<AttemptSummary[]>([]);
+  const [recordNote, setRecordNote] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const hydrated = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
+      let local = emptyBanks();
+      let saved: PracticeSession | null = null;
+      let idbFailed = false;
       try {
-        const [civil, management, saved] = await Promise.all([
+        const [civil, management, session] = await Promise.all([
           readBank("civil"),
           readBank("management"),
           readSession(),
         ]);
-        if (cancelled) return;
-        setBanks({ civil, management });
-        if (saved) {
-          const bank = saved.subject === "civil" ? civil : management;
-          const ids = new Set(bank.questions.map((question) => question.id));
-          if (saved.questionIds.length > 0 && saved.questionIds.every((id) => ids.has(id))) {
-            setSession(saved);
-            setSubject(saved.subject);
-            setFilter(saved.filter);
-            setLimit(
-              saved.limit === 10 || saved.limit === 20 || saved.limit === 50 || saved.limit === "all"
-                ? saved.limit
-                : "all",
-            );
-          } else {
-            await clearSession();
+        local = { civil, management };
+        saved = session;
+      } catch {
+        idbFailed = true;
+      }
+
+      let nextBanks = local;
+      let serverOk = false;
+      try {
+        const response = await fetch("/api/banks");
+        if (!response.ok) throw new Error("banks");
+        const payload = (await response.json()) as { banks: Record<SubjectId, BankState> };
+        nextBanks = payload.banks;
+        serverOk = true;
+        let migrated = false;
+        for (const id of ["civil", "management"] as const) {
+          const localBank = local[id];
+          if (nextBanks[id].questions.length === 0 && localBank.meta && localBank.questions.length > 0) {
+            const put = await fetch("/api/banks", {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ meta: localBank.meta, questions: localBank.questions }),
+            });
+            if (put.ok) {
+              nextBanks = { ...nextBanks, [id]: localBank };
+              migrated = true;
+            }
           }
         }
+        if (!idbFailed) {
+          await Promise.all(
+            (["civil", "management"] as const).map(async (id) => {
+              const stored = nextBanks[id];
+              if (stored.meta && stored.questions.length > 0) {
+                await writeBank(stored.meta, stored.questions, { keepSession: true });
+              }
+            }),
+          );
+        }
+        const [mistakeResponse, attemptResponse] = await Promise.all([
+          fetch("/api/mistakes"),
+          fetch("/api/attempts"),
+        ]);
+        if (mistakeResponse.ok && attemptResponse.ok && !cancelled) {
+          const mistakePayload = (await mistakeResponse.json()) as {
+            mistakes: Record<SubjectId, MistakeRecord[]>;
+          };
+          const attemptPayload = (await attemptResponse.json()) as { attempts: AttemptSummary[] };
+          setMistakes(mistakePayload.mistakes);
+          setAttempts(attemptPayload.attempts);
+        }
+        if (!cancelled && migrated) setNotice("已把浏览器里的题库写入本机数据库。");
       } catch {
         if (!cancelled) {
-          setMemoryOnly(true);
-          setError("浏览器打不开本地题库。这次页面里仍可练习，但刷新后题目会丢失。");
-        }
-      } finally {
-        if (!cancelled) {
-          hydrated.current = true;
-          setReady(true);
+          setDatabaseDown(true);
+          setMemoryOnly(idbFailed);
+          setError(
+            idbFailed
+              ? "浏览器打不开本地题库，本机数据库也没有连上。这次页面里仍可练习，但刷新后题目会丢失。"
+              : "连不上本机数据库，先用浏览器里的题库。错题和历史要等服务恢复后才会继续记。",
+          );
         }
       }
+
+      if (cancelled) return;
+      setBanks(nextBanks);
+      if (saved) {
+        const restored = restoreSession(saved);
+        const stored = nextBanks[restored.subject];
+        const ids = new Set(stored.questions.map((question) => question.id));
+        if (restored.questionIds.length > 0 && restored.questionIds.every((id) => ids.has(id))) {
+          setSession(restored);
+          setSubject(restored.subject);
+          setFilter(restored.filter);
+          setLimit(
+            restored.limit === 10 || restored.limit === 20 || restored.limit === 50 || restored.limit === "all"
+              ? restored.limit
+              : "all",
+          );
+        } else {
+          await clearSession();
+        }
+      }
+      if (!serverOk && idbFailed) setMemoryOnly(true);
+      hydrated.current = true;
+      setReady(true);
     })();
     return () => {
       cancelled = true;
@@ -189,6 +266,8 @@ export function PracticeApp() {
       const response = await fetch("/api/parse", { method: "POST", body });
       const payload = (await response.json()) as ParseResult & {
         fileName?: string;
+        importedAt?: number;
+        persisted?: boolean;
         error?: string;
       };
       if (!response.ok) {
@@ -198,7 +277,7 @@ export function PracticeApp() {
       const meta: BankMeta = {
         subject,
         fileName: payload.fileName ?? file.name,
-        importedAt: Date.now(),
+        importedAt: payload.importedAt ?? Date.now(),
         warnings: payload.warnings ?? [],
         stats: payload.stats,
       };
@@ -206,6 +285,12 @@ export function PracticeApp() {
         await writeBank(meta, payload.questions);
       } catch {
         setMemoryOnly(true);
+      }
+      if (payload.persisted === false) {
+        setDatabaseDown(true);
+        setError("题目留在这台浏览器里了，但没有写入数据库。错题和历史要等数据库恢复后才会继续记。");
+      } else {
+        void refreshRecords();
       }
       setBanks((current) => ({ ...current, [subject]: { meta, questions: payload.questions } }));
       setNotice(
@@ -220,26 +305,46 @@ export function PracticeApp() {
     }
   }
 
-  function beginPractice(nextSubject = subject, nextFilter = filter, nextLimit = limit) {
-    const source = banks[nextSubject].questions.filter(
-      (question) => nextFilter === "all" || question.type === nextFilter,
-    );
-    if (source.length === 0) {
-      setError(
-        banks[nextSubject].questions.length === 0
-          ? `「${subjectShort(nextSubject)}」还没有题目。先上传对应的《600母题》PDF。`
-          : "这个题型下没有题目。可以改成「全部」再开始。",
-      );
-      return;
+  function beginPractice(
+    nextSubject = subject,
+    nextFilter = filter,
+    nextLimit = limit,
+    source: PracticeSource = "bank",
+    presetIds?: string[],
+  ) {
+    const bankQuestions = banks[nextSubject].questions;
+    let ordered: Question[] = [];
+    if (presetIds) {
+      const byId = new Map(bankQuestions.map((question) => [question.id, question]));
+      ordered = presetIds
+        .map((id) => byId.get(id))
+        .filter((question): question is Question => Boolean(question));
+      if (ordered.length === 0) {
+        setError("错题库里的题目已经不在这科题库中。重新导入 PDF 后再练。");
+        return;
+      }
+    } else {
+      const pool = bankQuestions.filter((question) => nextFilter === "all" || question.type === nextFilter);
+      if (pool.length === 0) {
+        setError(
+          bankQuestions.length === 0
+            ? `「${subjectShort(nextSubject)}」还没有题目。先上传对应的《600母题》PDF。`
+            : "这个题型下没有题目。可以改成「全部」再开始。",
+        );
+        return;
+      }
+      const picked = nextLimit === "all" ? pool : pool.slice(0, nextLimit);
+      ordered = shuffleOn ? shuffle(picked) : picked;
     }
-    const picked = nextLimit === "all" ? source : source.slice(0, nextLimit);
-    const ordered = shuffleOn ? shuffle(picked) : picked;
     setError(null);
     setNotice(null);
+    setRecordNote(null);
     setSession({
+      sessionId: crypto.randomUUID(),
       subject: nextSubject,
-      filter: nextFilter,
-      limit: nextLimit,
+      filter: source === "mistakes" ? "all" : nextFilter,
+      source,
+      limit: source === "mistakes" ? "all" : nextLimit,
       questionIds: ordered.map((question) => question.id),
       selections: {},
       revealed: [],
@@ -250,16 +355,147 @@ export function PracticeApp() {
     });
   }
 
+  async function refreshRecords() {
+    try {
+      const [mistakeResponse, attemptResponse] = await Promise.all([
+        fetch("/api/mistakes"),
+        fetch("/api/attempts"),
+      ]);
+      if (!mistakeResponse.ok || !attemptResponse.ok) throw new Error("records");
+      const mistakePayload = (await mistakeResponse.json()) as {
+        mistakes: Record<SubjectId, MistakeRecord[]>;
+      };
+      const attemptPayload = (await attemptResponse.json()) as { attempts: AttemptSummary[] };
+      setMistakes(mistakePayload.mistakes);
+      setAttempts(attemptPayload.attempts);
+      setDatabaseDown(false);
+    } catch {
+      setDatabaseDown(true);
+    }
+  }
+
+  async function recordSelection(current: PracticeSession, questionId: string, selected: string) {
+    try {
+      const response = await fetch("/api/answers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: current.sessionId, questionId, selected }),
+      });
+      if (!response.ok) throw new Error("record");
+      setRecordNote(null);
+      setDatabaseDown(false);
+    } catch {
+      setDatabaseDown(true);
+      setRecordNote("这道题先留在本次练习里，交卷时会写入错题库。");
+    }
+  }
+
+  async function finishAndStore(snapshot: PracticeSession) {
+    try {
+      const response = await fetch("/api/attempts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: snapshot.sessionId,
+          subject: snapshot.subject,
+          filter: snapshot.filter,
+          source: snapshot.source ?? "bank",
+          startedAt: snapshot.startedAt,
+          questionIds: snapshot.questionIds,
+          selections: snapshot.selections,
+        }),
+      });
+      if (!response.ok) throw new Error("finish");
+      setRecordNote(null);
+      setDatabaseDown(false);
+      await refreshRecords();
+    } catch {
+      setDatabaseDown(true);
+      setRecordNote("这次成绩没能写入数据库。可以在小结里再保存一次。");
+    }
+  }
+
+  async function flushRevealed(snapshot: PracticeSession) {
+    const answers = snapshot.revealed.map((questionId) => ({
+      questionId,
+      selected: snapshot.selections[questionId] ?? "",
+    }));
+    if (answers.length === 0) return;
+    try {
+      const response = await fetch("/api/answers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: snapshot.sessionId, answers }),
+      });
+      if (!response.ok) throw new Error("flush");
+    } catch {
+      setDatabaseDown(true);
+    }
+  }
+
+  function leaveSession() {
+    const current = session;
+    setSession(null);
+    if (!current || current.finished) {
+      void refreshRecords();
+      return;
+    }
+    void flushRevealed(current).finally(() => {
+      void refreshRecords();
+    });
+  }
+
+  async function dismissOneMistake(questionId: string) {
+    try {
+      const response = await fetch(`/api/mistakes?questionId=${encodeURIComponent(questionId)}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) throw new Error("dismiss");
+      setMistakes((current) => ({
+        civil: current.civil.filter((item) => item.question.id !== questionId),
+        management: current.management.filter((item) => item.question.id !== questionId),
+      }));
+    } catch {
+      setError("这道题没能移出错题库。");
+    }
+  }
+
+  async function clearMistakeBank() {
+    const count = mistakes[subject].length;
+    if (count === 0) return;
+    const confirmed = window.confirm(
+      `清空「${subjectShort(subject)}」的 ${count} 道错题？已交卷的历史记录仍保留。`,
+    );
+    if (!confirmed) return;
+    try {
+      const response = await fetch(`/api/mistakes?subject=${subject}`, { method: "DELETE" });
+      if (!response.ok) throw new Error("clear");
+      setMistakes((current) => ({ ...current, [subject]: [] }));
+      setNotice(`已清空「${subjectShort(subject)}」错题库。`);
+    } catch {
+      setError("错题库没有清空。");
+    }
+  }
+
   async function removeBank() {
     if (bank.questions.length === 0) return;
-    const confirmed = window.confirm(`清空「${subjectShort(subject)}」的 ${bank.questions.length} 道题？`);
+    const confirmed = window.confirm(
+      `清空「${subjectShort(subject)}」的 ${bank.questions.length} 道题？这一科的错题库也会一起清空，已交卷的历史记录仍保留。`,
+    );
     if (!confirmed) return;
+    try {
+      const response = await fetch(`/api/banks?subject=${subject}`, { method: "DELETE" });
+      if (!response.ok) throw new Error("delete");
+    } catch {
+      setDatabaseDown(true);
+    }
     try {
       await clearBank(subject);
     } catch {
       setMemoryOnly(true);
     }
     setBanks((current) => ({ ...current, [subject]: { meta: null, questions: [] } }));
+    setMistakes((current) => ({ ...current, [subject]: [] }));
     if (session?.subject === subject) setSession(null);
     setNotice(`已清空「${subjectShort(subject)}」题库。`);
   }
@@ -267,7 +503,7 @@ export function PracticeApp() {
   if (!ready) {
     return (
       <main className="mx-auto flex min-h-full w-full max-w-3xl items-center px-4 py-16">
-        <p className="text-sm text-muted-foreground">正在打开保存在这台浏览器里的题库…</p>
+        <p className="text-sm text-muted-foreground">正在打开本机数据库里的题库…</p>
       </main>
     );
   }
@@ -282,7 +518,7 @@ export function PracticeApp() {
         </div>
         <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
           刷土木建筑工程、建设工程造价管理的单项和多项选择题。把《600母题》PDF
-          拖进页面即可抽题；做完能看对错、正确答案和解析。题库记在这台浏览器里，刷新不会丢。
+          拖进页面即可抽题；做完能看对错、正确答案和解析。题库、错题和每次交卷的成绩记在运行这个页面的电脑上，换浏览器也能接着看。
         </p>
       </header>
 
@@ -291,16 +527,25 @@ export function PracticeApp() {
           浏览器无法保存题库（可能是无痕模式或存储被禁用）。当前页面还能练习，刷新后需要重新上传。
         </p>
       ) : null}
+      {databaseDown && !memoryOnly ? (
+        <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive" role="status">
+          本机数据库暂时连不上。当前题目还能做，错题和历史要等服务恢复后才会继续记。
+        </p>
+      ) : null}
 
       {session ? (
         <SessionView
           session={session}
           questions={banks[session.subject].questions}
+          recordNote={recordNote}
           onChange={setSession}
-          onExit={() => setSession(null)}
+          onExit={leaveSession}
+          onRecord={(questionId, selected) => void recordSelection(session, questionId, selected)}
+          onFinish={(snapshot) => void finishAndStore(snapshot)}
           onRetry={() =>
             setSession({
               ...session,
+              sessionId: crypto.randomUUID(),
               selections: {},
               revealed: [],
               index: 0,
@@ -311,32 +556,72 @@ export function PracticeApp() {
           }
         />
       ) : (
-        <HomeView
-          subject={subject}
-          onSubject={(value) => {
-            setSubject(value);
+        <div className="flex flex-col gap-4">
+          <Tabs value={subject} onValueChange={(value) => {
+            setSubject(value as SubjectId);
             setError(null);
             setNotice(null);
-          }}
-          filter={filter}
-          onFilter={setFilter}
-          limit={limit}
-          onLimit={setLimit}
-          shuffleOn={shuffleOn}
-          onShuffle={setShuffleOn}
-          bank={bank}
-          available={filtered.length}
-          parsing={parsing}
-          dragging={dragging}
-          error={error}
-          notice={notice}
-          fileRef={fileRef}
-          onBrowse={() => fileRef.current?.click()}
-          onFile={(file) => void ingest(file)}
-          onDrag={setDragging}
-          onStart={() => beginPractice()}
-          onClear={() => void removeBank()}
-        />
+          }}>
+            <TabsList className="grid h-auto w-full grid-cols-2">
+              {SUBJECTS.map((item) => (
+                <TabsTrigger key={item.id} value={item.id} className="h-auto px-2 py-2">
+                  <span className="sm:hidden">{item.short}</span>
+                  <span className="hidden sm:inline">{item.full}</span>
+                </TabsTrigger>
+              ))}
+            </TabsList>
+          </Tabs>
+          <Tabs value={homeTab} onValueChange={(value) => setHomeTab(value as "practice" | "mistakes" | "history")}>
+            <TabsList className="h-auto w-full">
+              <TabsTrigger value="practice" className="h-9 flex-1">练习</TabsTrigger>
+              <TabsTrigger value="mistakes" className="h-9 flex-1">
+                错题库{mistakes[subject].length > 0 ? ` ${mistakes[subject].length}` : ""}
+              </TabsTrigger>
+              <TabsTrigger value="history" className="h-9 flex-1">历史</TabsTrigger>
+            </TabsList>
+          </Tabs>
+          {error ? (
+            <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive" role="alert">
+              {error}
+            </p>
+          ) : null}
+          {notice ? (
+            <p className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-sm" role="status">
+              {notice}
+            </p>
+          ) : null}
+          {homeTab === "practice" ? (
+            <HomeView
+              subject={subject}
+              filter={filter}
+              onFilter={setFilter}
+              limit={limit}
+              onLimit={setLimit}
+              shuffleOn={shuffleOn}
+              onShuffle={setShuffleOn}
+              bank={bank}
+              available={filtered.length}
+              parsing={parsing}
+              dragging={dragging}
+              fileRef={fileRef}
+              onBrowse={() => fileRef.current?.click()}
+              onFile={(file) => void ingest(file)}
+              onDrag={setDragging}
+              onStart={() => beginPractice()}
+              onClear={() => void removeBank()}
+            />
+          ) : null}
+          {homeTab === "mistakes" ? (
+            <MistakePanel
+              subject={subject}
+              mistakes={mistakes[subject]}
+              onPractice={(questionIds) => beginPractice(subject, "all", "all", "mistakes", questionIds)}
+              onDismiss={(questionId) => void dismissOneMistake(questionId)}
+              onClear={() => void clearMistakeBank()}
+            />
+          ) : null}
+          {homeTab === "history" ? <HistoryPanel subject={subject} attempts={attempts} /> : null}
+        </div>
       )}
     </main>
   );
@@ -344,7 +629,6 @@ export function PracticeApp() {
 
 function HomeView({
   subject,
-  onSubject,
   filter,
   onFilter,
   limit,
@@ -355,8 +639,6 @@ function HomeView({
   available,
   parsing,
   dragging,
-  error,
-  notice,
   fileRef,
   onBrowse,
   onFile,
@@ -365,7 +647,6 @@ function HomeView({
   onClear,
 }: {
   subject: SubjectId;
-  onSubject: (subject: SubjectId) => void;
   filter: PracticeFilter;
   onFilter: (filter: PracticeFilter) => void;
   limit: LimitChoice;
@@ -376,8 +657,6 @@ function HomeView({
   available: number;
   parsing: boolean;
   dragging: boolean;
-  error: string | null;
-  notice: string | null;
   fileRef: RefObject<HTMLInputElement | null>;
   onBrowse: () => void;
   onFile: (file: File) => void;
@@ -390,17 +669,6 @@ function HomeView({
 
   return (
     <div className="flex flex-col gap-4">
-      <Tabs value={subject} onValueChange={(value) => onSubject(value as SubjectId)}>
-        <TabsList className="grid h-auto w-full grid-cols-2">
-          {SUBJECTS.map((item) => (
-            <TabsTrigger key={item.id} value={item.id} className="h-auto px-2 py-2">
-              <span className="sm:hidden">{item.short}</span>
-              <span className="hidden sm:inline">{item.full}</span>
-            </TabsTrigger>
-          ))}
-        </TabsList>
-      </Tabs>
-
       <div className="grid gap-4 sm:grid-cols-5">
         <Card className="sm:col-span-2">
           <CardHeader>
@@ -469,7 +737,7 @@ function HomeView({
                 {parsing ? "正在抽取文字并拆分选择题…" : "把 PDF 拖到这里，或点击选择文件"}
               </span>
               <span className="text-xs leading-5 text-muted-foreground">
-                当前科目：{subjectLabel(subject)}。解析在本地服务完成，题目只写入这台浏览器。
+                当前科目：{subjectLabel(subject)}。解析在本地服务完成，题目写入本机数据库。
               </span>
             </button>
             <input
@@ -486,16 +754,6 @@ function HomeView({
         </Card>
       </div>
 
-      {error ? (
-        <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive" role="alert">
-          {error}
-        </p>
-      ) : null}
-      {notice ? (
-        <p className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-sm" role="status">
-          {notice}
-        </p>
-      ) : null}
       {bank.meta?.warnings?.length ? (
         <ul className="flex flex-col gap-1 text-sm text-muted-foreground">
           {bank.meta.warnings.map((warning) => (
@@ -557,14 +815,20 @@ function Stat({ label, value }: { label: string; value: string }) {
 function SessionView({
   session,
   questions,
+  recordNote,
   onChange,
   onExit,
+  onRecord,
+  onFinish,
   onRetry,
 }: {
   session: PracticeSession;
   questions: Question[];
+  recordNote: string | null;
   onChange: (session: PracticeSession) => void;
   onExit: () => void;
+  onRecord: (questionId: string, selected: string) => void;
+  onFinish: (session: PracticeSession) => void;
   onRetry: () => void;
 }) {
   const byId = useMemo(() => new Map(questions.map((question) => [question.id, question])), [questions]);
@@ -581,9 +845,11 @@ function SessionView({
       <SummaryView
         session={session}
         summary={summary}
+        recordNote={recordNote}
         onReview={() => onChange({ ...session, review: true, index: 0 })}
         onExit={onExit}
         onRetry={onRetry}
+        onSave={() => onFinish(session)}
       />
     );
   }
@@ -625,6 +891,7 @@ function SessionView({
         ? session.revealed
         : [...session.revealed, question.id],
     });
+    onRecord(question.id, selected);
   }
 
   function move(delta: number) {
@@ -635,12 +902,22 @@ function SessionView({
   }
 
   function handIn() {
+    if (session.finished) {
+      onChange({ ...session, review: false });
+      return;
+    }
+    const snapshot: PracticeSession = {
+      ...session,
+      selections: { ...session.selections },
+      revealed: [...session.revealed],
+    };
     onChange({
       ...session,
       finished: true,
       review: false,
       revealed: [...session.questionIds],
     });
+    onFinish(snapshot);
   }
 
   return (
@@ -649,6 +926,7 @@ function SessionView({
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant="secondary">{subjectShort(session.subject)}</Badge>
           <Badge variant="outline">{session.review ? "错题回看" : typeLabel(question.type)}</Badge>
+          {session.source === "mistakes" ? <Badge variant="outline">错题练习</Badge> : null}
         </div>
         <Button type="button" variant="ghost" onClick={onExit}>
           返回题库
@@ -721,6 +999,12 @@ function SessionView({
           {revealed ? <ResultBanner question={question} selected={selected} verdict={verdict} /> : null}
         </CardContent>
       </Card>
+
+      {recordNote ? (
+        <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive" role="status">
+          {recordNote}
+        </p>
+      ) : null}
 
       <div className="sticky bottom-0 z-10 -mx-4 flex flex-wrap items-center gap-2 border-t bg-background/95 px-4 py-3 backdrop-blur sm:static sm:mx-0 sm:border-0 sm:bg-transparent sm:px-0">
         <Button type="button" variant="outline" className="h-11" disabled={index === 0} onClick={() => move(-1)}>
@@ -852,19 +1136,24 @@ function summarize(paper: Question[], session: PracticeSession) {
 function SummaryView({
   session,
   summary,
+  recordNote,
   onReview,
   onExit,
   onRetry,
+  onSave,
 }: {
   session: PracticeSession;
   summary: Summary;
+  recordNote: string | null;
   onReview: () => void;
   onExit: () => void;
   onRetry: () => void;
+  onSave: () => void;
 }) {
   const accuracy = summary.graded === 0 ? null : (summary.correct / summary.graded) * 100;
   const filterText =
     session.filter === "all" ? "全部题型" : session.filter === "single" ? "只练单选" : "只练多选";
+  const sourceText = session.source === "mistakes" ? "错题练习" : "题库练习";
 
   return (
     <div className="flex flex-col gap-4">
@@ -872,7 +1161,7 @@ function SummaryView({
         <CardHeader>
           <CardTitle>本次小结</CardTitle>
           <CardDescription>
-            {subjectLabel(session.subject)} · {filterText} · {session.questionIds.length} 道
+            {subjectLabel(session.subject)} · {sourceText} · {filterText} · {session.questionIds.length} 道
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
@@ -882,11 +1171,19 @@ function SummaryView({
             <Stat label="错题" value={`${summary.wrong}`} />
           </div>
           <p className="text-sm leading-6 text-muted-foreground">
-            有标准答案的题才计入得分，未作答按错误计算。多选题必须与答案完全一致。
+            有标准答案的题才计入得分，未作答按错误计算。多选题必须与答案完全一致。答错和交卷时未作答的题会进入错题库，之后做对一次就移出。这次成绩会留在历史记录里。
             {summary.ungraded > 0
               ? ` 另有 ${summary.ungraded} 道题 PDF 中未识别到答案，没有算进正确率。`
               : ""}
           </p>
+          {recordNote ? (
+            <div className="flex flex-col items-start gap-2">
+              <p className="text-sm text-destructive" role="status">{recordNote}</p>
+              <Button type="button" variant="outline" onClick={onSave}>
+                重新保存这次成绩
+              </Button>
+            </div>
+          ) : null}
           <div className="flex flex-wrap gap-2">
             <Button type="button" className="h-11" disabled={summary.wrongOnes.length === 0} onClick={onReview}>
               回看错题

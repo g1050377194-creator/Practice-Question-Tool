@@ -3,11 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -H 0.0.0.0 -p 43123",
-    "build": "next build",
-    "start": "next start -H 0.0.0.0 -p 43123",
+    "dev": "node scripts/with-sqlite.mjs ./node_modules/next/dist/bin/next dev -H 0.0.0.0 -p 43123",
+    "build": "node scripts/with-sqlite.mjs ./node_modules/next/dist/bin/next build",
+    "start": "node scripts/with-sqlite.mjs ./node_modules/next/dist/bin/next start -H 0.0.0.0 -p 43123",
     "lint": "eslint",
-    "test": "tsx --test src/lib/parse-questions.test.ts"
+    "test": "node scripts/with-sqlite.mjs ./node_modules/tsx/dist/cli.mjs --test src/lib/parse-questions.test.ts src/lib/server-db.test.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",
