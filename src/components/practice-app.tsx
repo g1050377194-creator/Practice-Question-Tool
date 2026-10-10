@@ -1153,7 +1153,7 @@ function QuestionPicker({
                   type="button"
                   aria-current={here ? "true" : undefined}
                   aria-label={`跳到第 ${itemIndex + 1} 题`}
-                  title={item.number === String(itemIndex + 1) ? undefined : `原题号 ${item.number}`}
+                  title={item.number === itemIndex + 1 ? undefined : `原题号 ${item.number}`}
                   className={cn(
                     "h-8 rounded-md border text-sm font-heading tabular-nums outline-none",
                     tone === "right" && "border-emerald-700 bg-emerald-100 text-emerald-950",
