@@ -539,7 +539,12 @@ export function PracticeApp() {
   }
 
   return (
-    <main className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-6 sm:py-10">
+    <main
+      className={cn(
+        "mx-auto flex w-full flex-col gap-6 px-4 py-6 sm:py-10",
+        session ? "max-w-6xl" : "max-w-3xl",
+      )}
+    >
       <header className="flex flex-col gap-3">
         <p className="text-sm font-medium tracking-wide text-primary">二级造价工程师 · 2026</p>
         <div className="flex flex-wrap items-end justify-between gap-3">
@@ -867,6 +872,7 @@ function SessionView({
   onFinish: (session: PracticeSession) => void;
   onRetry: () => void;
 }) {
+  const stemRef = useRef<HTMLHeadingElement>(null);
   const byId = useMemo(() => new Map(questions.map((question) => [question.id, question])), [questions]);
   const paper = session.questionIds
     .map((id) => byId.get(id))
@@ -882,7 +888,7 @@ function SessionView({
         session={session}
         summary={summary}
         recordNote={recordNote}
-        onReview={() => onChange({ ...session, review: true, index: 0 })}
+        onReview={(start) => onChange({ ...session, review: true, index: start })}
         onExit={onExit}
         onRetry={onRetry}
         onSave={() => onFinish(session)}
@@ -910,6 +916,18 @@ function SessionView({
   const revealed = session.revealed.includes(question.id) || session.finished;
   const verdict = verdictFor(question, selected, revealed);
   const progress = active.length === 0 ? 0 : Math.round(((index + 1) / active.length) * 100);
+
+  function jump(next: number) {
+    const target = Math.min(active.length - 1, Math.max(0, next));
+    if (target === index) {
+      stemRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    onChange({ ...session, index: target });
+    window.setTimeout(() => {
+      stemRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 0);
+  }
 
   function updateSelection(next: string) {
     if (revealed) return;
@@ -957,7 +975,8 @@ function SessionView({
   }
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="grid grid-cols-[minmax(0,1fr)_8.5rem] items-start gap-3 sm:grid-cols-[minmax(0,1fr)_12.5rem] md:grid-cols-[minmax(0,1fr)_17.5rem] md:gap-4">
+      <div className="flex min-w-0 flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant="secondary">{subjectShort(session.subject)}</Badge>
@@ -978,7 +997,7 @@ function SessionView({
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base leading-7">
+          <CardTitle ref={stemRef} className="scroll-mt-4 text-base leading-7">
             <span className="mr-2 font-heading text-primary">{question.number}.</span>
             {question.stem}
           </CardTitle>
@@ -1042,7 +1061,7 @@ function SessionView({
         </p>
       ) : null}
 
-      <div className="sticky bottom-0 z-10 -mx-4 flex flex-wrap items-center gap-2 border-t bg-background/95 px-4 py-3 backdrop-blur sm:static sm:mx-0 sm:border-0 sm:bg-transparent sm:px-0">
+      <div className="sticky bottom-0 z-10 flex flex-wrap items-center gap-2 border-t bg-background/95 py-3 backdrop-blur md:static md:border-0 md:bg-transparent md:py-0">
         <Button type="button" variant="outline" className="h-11" disabled={index === 0} onClick={() => move(-1)}>
           上一题
         </Button>
@@ -1070,7 +1089,121 @@ function SessionView({
           </Button>
         ) : null}
       </div>
+      </div>
+      <div className="sticky top-4 self-start">
+        <QuestionPicker questions={active} session={session} current={index} onJump={jump} />
+      </div>
     </div>
+  );
+}
+
+function QuestionPicker({
+  questions,
+  session,
+  current,
+  onJump,
+}: {
+  questions: Question[];
+  session: PracticeSession;
+  current: number;
+  onJump: (index: number) => void;
+}) {
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const currentRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const node = currentRef.current;
+    const scroller = scrollerRef.current;
+    if (!node || !scroller) return;
+    const nodeBox = node.getBoundingClientRect();
+    const frame = scroller.getBoundingClientRect();
+    if (nodeBox.top < frame.top) scroller.scrollTop -= frame.top - nodeBox.top + 4;
+    else if (nodeBox.bottom > frame.bottom) scroller.scrollTop += nodeBox.bottom - frame.bottom + 4;
+  }, [current]);
+
+  return (
+    <Card size="sm" className="flex max-h-[calc(100dvh-2rem)] flex-col">
+      <CardHeader className="shrink-0">
+        <CardTitle>选题</CardTitle>
+        <CardDescription>点题号直接跳到那一题。</CardDescription>
+      </CardHeader>
+      <CardContent className="flex min-h-0 flex-1 flex-col gap-3">
+        <div ref={scrollerRef} className="min-h-0 flex-1 overflow-y-auto">
+          <div className="grid grid-cols-3 gap-1.5 sm:grid-cols-4">
+            {questions.map((item, itemIndex) => {
+              const picked = session.selections[item.id] ?? "";
+              const shown = session.revealed.includes(item.id) || session.finished;
+              const result = verdictFor(item, picked, shown);
+              const here = itemIndex === current;
+              const tone = here
+                ? "current"
+                : result === "correct"
+                  ? "right"
+                  : result === "wrong"
+                    ? "wrong"
+                    : result === "ungraded"
+                      ? "ungraded"
+                      : picked
+                        ? "picked"
+                        : "idle";
+              return (
+                <button
+                  key={item.id}
+                  ref={here ? currentRef : undefined}
+                  type="button"
+                  aria-current={here ? "true" : undefined}
+                  aria-label={`跳到第 ${itemIndex + 1} 题`}
+                  title={item.number === String(itemIndex + 1) ? undefined : `原题号 ${item.number}`}
+                  className={cn(
+                    "h-8 rounded-md border text-sm font-heading tabular-nums outline-none",
+                    tone === "right" && "border-emerald-700 bg-emerald-100 text-emerald-950",
+                    tone === "wrong" && "border-rose-700 bg-rose-100 text-rose-950",
+                    tone === "ungraded" && "border-border bg-muted text-muted-foreground",
+                    tone === "picked" && "border-primary/40 bg-primary/10 text-foreground",
+                    tone === "idle" && "border-border bg-background text-foreground",
+                    tone === "current" && "border-primary bg-primary text-primary-foreground",
+                  )}
+                  onClick={() => onJump(itemIndex)}
+                >
+                  {itemIndex + 1}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <div className="flex shrink-0 flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+          <PickerKey tone="idle" label="未做" />
+          <PickerKey tone="picked" label="已选" />
+          <PickerKey tone="right" label="做对" />
+          <PickerKey tone="wrong" label="做错" />
+          <PickerKey tone="current" label="当前" />
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function PickerKey({
+  tone,
+  label,
+}: {
+  tone: "idle" | "picked" | "right" | "wrong" | "current";
+  label: string;
+}) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span
+        className={cn(
+          "size-3.5 rounded-[4px] border",
+          tone === "idle" && "border-border bg-background",
+          tone === "picked" && "border-primary/40 bg-primary/10",
+          tone === "right" && "border-emerald-700 bg-emerald-100",
+          tone === "wrong" && "border-rose-700 bg-rose-100",
+          tone === "current" && "border-primary bg-primary",
+        )}
+      />
+      {label}
+    </span>
   );
 }
 
@@ -1181,7 +1314,7 @@ function SummaryView({
   session: PracticeSession;
   summary: Summary;
   recordNote: string | null;
-  onReview: () => void;
+  onReview: (index: number) => void;
   onExit: () => void;
   onRetry: () => void;
   onSave: () => void;
@@ -1221,7 +1354,7 @@ function SummaryView({
             </div>
           ) : null}
           <div className="flex flex-wrap gap-2">
-            <Button type="button" className="h-11" disabled={summary.wrongOnes.length === 0} onClick={onReview}>
+            <Button type="button" className="h-11" disabled={summary.wrongOnes.length === 0} onClick={() => onReview(0)}>
               回看错题
             </Button>
             <Button type="button" variant="outline" className="h-11" onClick={onRetry}>
@@ -1238,23 +1371,29 @@ function SummaryView({
       <Card>
         <CardHeader>
           <CardTitle>错题</CardTitle>
-          <CardDescription>
-            {summary.wrongOnes.length === 0 ? "这次没有错题。" : `共 ${summary.wrongOnes.length} 道，点进去可以对照解析。`}
+            <CardDescription>
+            {summary.wrongOnes.length === 0 ? "这次没有错题。" : `共 ${summary.wrongOnes.length} 道，点一道就跳到那道题。`}
           </CardDescription>
         </CardHeader>
         {summary.wrongOnes.length > 0 ? (
           <CardContent>
             <ScrollArea className="h-80">
-              <ul className="flex flex-col gap-3 pr-3">
-                {summary.wrongOnes.map((question) => (
-                  <li key={question.id} className="rounded-lg border px-3 py-3 text-sm leading-6">
-                    <p className="font-medium">
-                      {question.number}. {question.stem}
-                    </p>
-                    <p className="mt-1 text-muted-foreground">
-                      你的选择 {session.selections[question.id] || "未作答"} · 正确答案{" "}
-                      {question.answer ?? "本题 PDF 中未识别到答案"}
-                    </p>
+              <ul className="flex flex-col gap-2 pr-3">
+                {summary.wrongOnes.map((question, itemIndex) => (
+                  <li key={question.id}>
+                    <button
+                      type="button"
+                      className="w-full rounded-lg border px-3 py-3 text-left text-sm leading-6 hover:border-primary hover:bg-primary/5"
+                      onClick={() => onReview(itemIndex)}
+                    >
+                      <p className="font-medium">
+                        {question.number}. {question.stem}
+                      </p>
+                      <p className="mt-1 text-muted-foreground">
+                        你的选择 {session.selections[question.id] || "未作答"} · 正确答案{" "}
+                        {question.answer ?? "本题 PDF 中未识别到答案"}
+                      </p>
+                    </button>
                   </li>
                 ))}
               </ul>
