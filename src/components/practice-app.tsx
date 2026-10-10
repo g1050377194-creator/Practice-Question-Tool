@@ -105,6 +105,7 @@ export function PracticeApp() {
   const [limit, setLimit] = useState<LimitChoice>(20);
   const [shuffleOn, setShuffleOn] = useState(false);
   const [session, setSession] = useState<PracticeSession | null>(null);
+  const [paused, setPaused] = useState<PracticeSession | null>(null);
   const [parsing, setParsing] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -227,12 +228,13 @@ export function PracticeApp() {
 
   useEffect(() => {
     if (!hydrated.current) return;
-    if (!session) {
+    const stored = session ?? (paused && !paused.finished ? paused : null);
+    if (!stored) {
       void clearSession().catch(() => setMemoryOnly(true));
       return;
     }
-    void writeSession(session).catch(() => setMemoryOnly(true));
-  }, [session]);
+    void writeSession(stored).catch(() => setMemoryOnly(true));
+  }, [session, paused]);
 
   const bank = banks[subject];
   const filtered = useMemo(
@@ -297,6 +299,7 @@ export function PracticeApp() {
         `「${subjectShort(subject)}」已入库 ${payload.stats.total} 道题，其中单选 ${payload.stats.single} 道、多选 ${payload.stats.multiple} 道。`,
       );
       if (session?.subject === subject) setSession(null);
+      if (paused?.subject === subject) setPaused(null);
     } catch {
       setError("上传中断了。请确认开发服务还在运行，然后重新选择文件。");
     } finally {
@@ -336,9 +339,16 @@ export function PracticeApp() {
       const picked = nextLimit === "all" ? pool : pool.slice(0, nextLimit);
       ordered = shuffleOn ? shuffle(picked) : picked;
     }
+    if (paused && !paused.finished) {
+      const replace = window.confirm(
+        `「${subjectShort(paused.subject)}」还有一组题做到第 ${paused.index + 1} 题。开始新的一组后，这次进度会丢掉。`,
+      );
+      if (!replace) return;
+    }
     setError(null);
     setNotice(null);
     setRecordNote(null);
+    setPaused(null);
     setSession({
       sessionId: crypto.randomUUID(),
       subject: nextSubject,
@@ -435,14 +445,33 @@ export function PracticeApp() {
 
   function leaveSession() {
     const current = session;
-    setSession(null);
-    if (!current || current.finished) {
-      void refreshRecords();
+    if (current && !current.finished) {
+      setPaused(current);
+      setSession(null);
+      void flushRevealed(current).finally(() => {
+        void refreshRecords();
+      });
       return;
     }
-    void flushRevealed(current).finally(() => {
-      void refreshRecords();
-    });
+    setPaused(null);
+    setSession(null);
+    void refreshRecords();
+  }
+
+  function resumePractice() {
+    if (!paused || paused.finished) return;
+    setSubject(paused.subject);
+    setFilter(paused.filter);
+    setLimit(
+      paused.limit === 10 || paused.limit === 20 || paused.limit === 50 || paused.limit === "all"
+        ? paused.limit
+        : "all",
+    );
+    setHomeTab("practice");
+    setRecordNote(null);
+    setError(null);
+    setSession(paused);
+    setPaused(null);
   }
 
   async function dismissOneMistake(questionId: string) {
@@ -497,6 +526,7 @@ export function PracticeApp() {
     setBanks((current) => ({ ...current, [subject]: { meta: null, questions: [] } }));
     setMistakes((current) => ({ ...current, [subject]: [] }));
     if (session?.subject === subject) setSession(null);
+    if (paused?.subject === subject) setPaused(null);
     setNotice(`已清空「${subjectShort(subject)}」题库。`);
   }
 
@@ -571,6 +601,12 @@ export function PracticeApp() {
               ))}
             </TabsList>
           </Tabs>
+          {paused && !paused.finished ? (
+            <Button type="button" className="h-11" onClick={resumePractice}>
+              <BookOpen />
+              继续刷题（{subjectShort(paused.subject)} · 第 {paused.index + 1}/{paused.questionIds.length} 题）
+            </Button>
+          ) : null}
           <Tabs value={homeTab} onValueChange={(value) => setHomeTab(value as "practice" | "mistakes" | "history")}>
             <TabsList className="h-auto w-full">
               <TabsTrigger value="practice" className="h-9 flex-1">练习</TabsTrigger>
