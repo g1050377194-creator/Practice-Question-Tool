@@ -17,8 +17,8 @@ export function isFilter(value: unknown): value is "all" | "single" | "multiple"
   return value === "all" || value === "single" || value === "multiple";
 }
 
-export function isSource(value: unknown): value is "bank" | "mistakes" {
-  return value === "bank" || value === "mistakes";
+export function isSource(value: unknown): value is "bank" | "mistakes" | "mixed" {
+  return value === "bank" || value === "mistakes" || value === "mixed";
 }
 
 function isChoice(value: unknown): value is Choice {

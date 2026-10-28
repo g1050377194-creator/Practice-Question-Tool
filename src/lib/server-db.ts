@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS mistakes (
   question_id TEXT PRIMARY KEY,
   subject TEXT NOT NULL,
   wrong_count INTEGER NOT NULL,
+  correct_streak INTEGER NOT NULL DEFAULT 0,
   last_selected TEXT NOT NULL,
   last_wrong_at INTEGER NOT NULL,
   active INTEGER NOT NULL
@@ -169,6 +170,10 @@ export function openExamDatabase(filePath: string): ExamDB {
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
   db.exec(SCHEMA);
+  const columns = db.prepare("PRAGMA table_info(mistakes)").all() as { name: string }[];
+  if (!columns.some((column) => column.name === "correct_streak")) {
+    db.exec("ALTER TABLE mistakes ADD COLUMN correct_streak INTEGER NOT NULL DEFAULT 0");
+  }
   return db;
 }
 
@@ -205,6 +210,14 @@ function readQuestion(db: ExamDB, id: string): Question | null {
   return row ? rowToQuestion(row) : null;
 }
 
+export const MASTERY_STREAK = 3;
+
+export type MasteryUpdate = {
+  questionId: string;
+  correctStreak: number;
+  removed: boolean;
+};
+
 function applyLog(
   db: ExamDB,
   sessionId: string,
@@ -212,7 +225,7 @@ function applyLog(
   selected: string,
   verdict: GradedVerdict,
   now: number,
-): void {
+): MasteryUpdate | null {
   const inserted = db
     .prepare(
       `INSERT INTO answer_log (session_id, question_id, selected, verdict, created_at)
@@ -220,14 +233,15 @@ function applyLog(
        ON CONFLICT(session_id, question_id) DO NOTHING`,
     )
     .run(sessionId, question.id, selected, verdict, now);
-  if (inserted.changes === 0) return;
+  if (inserted.changes === 0) return null;
   if (verdict === "wrong") {
     db.prepare(
-      `INSERT INTO mistakes (question_id, subject, wrong_count, last_selected, last_wrong_at, active)
-       VALUES (?, ?, 1, ?, ?, 1)
+      `INSERT INTO mistakes (question_id, subject, wrong_count, correct_streak, last_selected, last_wrong_at, active)
+       VALUES (?, ?, 1, 0, ?, ?, 1)
        ON CONFLICT(question_id) DO UPDATE SET
          subject = excluded.subject,
          wrong_count = wrong_count + 1,
+         correct_streak = 0,
          last_selected = excluded.last_selected,
          last_wrong_at = excluded.last_wrong_at,
          active = 1`,
@@ -236,11 +250,21 @@ function applyLog(
       `INSERT INTO mistake_events (session_id, question_id, subject, selected, created_at)
        VALUES (?, ?, ?, ?, ?)`,
     ).run(sessionId, question.id, question.subject, selected, now);
-    return;
+    return { questionId: question.id, correctStreak: 0, removed: false };
   }
-  if (verdict === "correct") {
-    db.prepare("UPDATE mistakes SET active = 0 WHERE question_id = ?").run(question.id);
-  }
+  if (verdict !== "correct") return null;
+  const existing = db
+    .prepare("SELECT active, correct_streak FROM mistakes WHERE question_id = ?")
+    .get(question.id) as { active: number; correct_streak: number } | undefined;
+  if (!existing || existing.active !== 1) return null;
+  const correctStreak = existing.correct_streak + 1;
+  const removed = correctStreak >= MASTERY_STREAK;
+  db.prepare("UPDATE mistakes SET correct_streak = ?, active = ? WHERE question_id = ?").run(
+    correctStreak,
+    removed ? 0 : 1,
+    question.id,
+  );
+  return { questionId: question.id, correctStreak, removed };
 }
 
 export function readBanks(db: ExamDB): Record<SubjectId, { meta: BankMeta | null; questions: Question[] }> {
@@ -328,7 +352,7 @@ export function listMistakes(db: ExamDB): Record<SubjectId, MistakeRecord[]> {
   const mistakes: Record<SubjectId, MistakeRecord[]> = { civil: [], management: [] };
   const rows = db
     .prepare(
-      `SELECT m.wrong_count, m.last_selected, m.last_wrong_at, q.*
+      `SELECT m.wrong_count, m.correct_streak, m.last_selected, m.last_wrong_at, q.*
        FROM mistakes m
        JOIN questions q ON q.id = m.question_id
        WHERE m.active = 1
@@ -336,6 +360,7 @@ export function listMistakes(db: ExamDB): Record<SubjectId, MistakeRecord[]> {
     )
     .all() as (QuestionRow & {
     wrong_count: number;
+    correct_streak: number;
     last_selected: string;
     last_wrong_at: number;
   })[];
@@ -358,6 +383,7 @@ export function listMistakes(db: ExamDB): Record<SubjectId, MistakeRecord[]> {
     mistakes[question.subject].push({
       question,
       wrongCount: row.wrong_count,
+      correctStreak: row.correct_streak,
       lastSelected: row.last_selected,
       lastWrongAt: row.last_wrong_at,
       events: history.get(question.id) ?? [],
@@ -381,7 +407,8 @@ export function recordAnswers(
   db: ExamDB,
   sessionId: string,
   answers: { questionId: string; selected: string }[],
-): void {
+): MasteryUpdate[] {
+  const updates: MasteryUpdate[] = [];
   withTransaction(db, () => {
     const now = Date.now();
     for (const item of answers) {
@@ -390,9 +417,11 @@ export function recordAnswers(
       const selected = normalizeSelected(item.selected) ?? "";
       const verdict = gradeAnswer(question.answer, selected, true);
       if (verdict === "pending") continue;
-      applyLog(db, sessionId, question, selected, verdict, now);
+      const update = applyLog(db, sessionId, question, selected, verdict, now);
+      if (update) updates.push(update);
     }
   });
+  return updates;
 }
 
 export type FinishAttemptInput = {

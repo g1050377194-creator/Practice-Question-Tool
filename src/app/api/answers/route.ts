@@ -31,9 +31,9 @@ export async function POST(request: Request) {
   if (!answers) return jsonError("作答列表无效。", 400);
 
   try {
-    recordAnswers(examDatabase(), body.sessionId, answers);
+    const mastery = recordAnswers(examDatabase(), body.sessionId, answers);
+    return Response.json({ ok: true, mastery });
   } catch {
     return jsonError("这道题没有写入错题库。", 500);
   }
-  return Response.json({ ok: true });
 }

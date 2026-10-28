@@ -57,7 +57,7 @@ test("有标准答案才计分，未作答算错", () => {
   assert.equal(gradeAnswer("A", "A", false), "pending");
 });
 
-test("答错进入错题库，做对后移出，再错会带着次数回来", () => {
+test("答错进入错题库，连续做对三次才移出，中途再错重新计数", () => {
   const db = tempDatabase();
   const first = question("civil:1:single:a:0", "A", 1);
   const second = question("civil:2:single:b:1", "B", 2);
@@ -68,17 +68,25 @@ test("答错进入错题库，做对后移出，再错会带着次数回来", ()
   let mistakes = listMistakes(db).civil;
   assert.equal(mistakes.length, 1);
   assert.equal(mistakes[0]?.wrongCount, 1);
+  assert.equal(mistakes[0]?.correctStreak, 0);
   assert.equal(mistakes[0]?.events.length, 1);
   assert.equal(mistakes[0]?.lastSelected, "B");
 
   recordAnswers(db, "session-2", [{ questionId: first.id, selected: "A" }]);
-  assert.equal(listMistakes(db).civil.length, 0);
-
-  recordAnswers(db, "session-3", [{ questionId: first.id, selected: "" }]);
+  recordAnswers(db, "session-3", [{ questionId: first.id, selected: "A" }]);
   mistakes = listMistakes(db).civil;
   assert.equal(mistakes.length, 1);
+  assert.equal(mistakes[0]?.correctStreak, 2);
+
+  recordAnswers(db, "session-4", [{ questionId: first.id, selected: "B" }]);
+  mistakes = listMistakes(db).civil;
+  assert.equal(mistakes[0]?.correctStreak, 0);
   assert.equal(mistakes[0]?.wrongCount, 2);
-  assert.equal(mistakes[0]?.events.length, 2);
+
+  recordAnswers(db, "session-5", [{ questionId: first.id, selected: "A" }]);
+  recordAnswers(db, "session-6", [{ questionId: first.id, selected: "A" }]);
+  recordAnswers(db, "session-7", [{ questionId: first.id, selected: "A" }]);
+  assert.equal(listMistakes(db).civil.length, 0);
   db.close();
 });
 

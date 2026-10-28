@@ -52,8 +52,8 @@ export function MistakePanel({
         <CardTitle>错题库</CardTitle>
         <CardDescription>
           {mistakes.length === 0
-            ? "答错，或交卷时还没做的题，会出现在这里。做对一次就移出。"
-            : `${subjectLabel(subject)}有 ${mistakes.length} 道还没掌握。按最近答错的时间排列，做对一次就移出。`}
+            ? "答错，或交卷时还没做的题，会出现在这里。连续做对 3 次才移出。"
+            : `${subjectLabel(subject)}有 ${mistakes.length} 道还没掌握。按最近答错的时间排列，连续做对 3 次才移出。`}
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
@@ -84,7 +84,7 @@ export function MistakePanel({
                     </p>
                     <p className="mt-1 text-muted-foreground">
                       上次选择 {choiceText(item.lastSelected)} · 正确答案 {item.question.answer ?? "本题没有标准答案"} ·
-                      错过 {item.wrongCount} 次 · {formatWhen(item.lastWrongAt)}
+                      错过 {item.wrongCount} 次 · 连续做对 {item.correctStreak}/3 · {formatWhen(item.lastWrongAt)}
                     </p>
                     <div className="mt-2 flex flex-wrap gap-2">
                       <Button
@@ -171,7 +171,8 @@ export function HistoryPanel({ subject, attempts }: { subject: SubjectId; attemp
                 return (
                   <li key={item.id} className="rounded-lg border px-3 py-3 text-sm leading-6">
                     <p className="font-medium">
-                      {formatWhen(item.finishedAt)} · {item.source === "mistakes" ? "错题练习" : "题库练习"} ·{" "}
+                      {formatWhen(item.finishedAt)} ·{" "}
+                      {item.source === "mistakes" ? "错题练习" : item.source === "mixed" ? "错题混练" : "题库练习"} ·{" "}
                       {filterText(item.filter)}
                     </p>
                     <p className="mt-1 text-muted-foreground">

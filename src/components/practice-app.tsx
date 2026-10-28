@@ -54,6 +54,39 @@ function emptyBanks(): Record<SubjectId, BankState> {
   };
 }
 
+function mixWithMistakes(
+  pool: Question[],
+  mistakeIds: Set<string>,
+  limit: number,
+  shuffleOn: boolean,
+): Question[] {
+  let review = pool.filter((question) => mistakeIds.has(question.id));
+  let fresh = pool.filter((question) => !mistakeIds.has(question.id));
+  if (shuffleOn) {
+    review = shuffle(review);
+    fresh = shuffle(fresh);
+  }
+  const size = Math.min(limit, review.length + fresh.length);
+  let reviewTake = Math.min(review.length, size);
+  let freshTake = Math.min(fresh.length, size - reviewTake);
+  if (review.length > 0 && fresh.length > 0 && size >= 2 && freshTake === 0) {
+    reviewTake = size - 1;
+    freshTake = 1;
+  }
+  const pickedReview = review.slice(0, reviewTake);
+  const pickedFresh = fresh.slice(0, freshTake);
+  if (shuffleOn) return shuffle([...pickedReview, ...pickedFresh]);
+  const mixed: Question[] = [];
+  const longer = Math.max(pickedReview.length, pickedFresh.length);
+  for (let index = 0; index < longer; index += 1) {
+    const reviewQuestion = pickedReview[index];
+    const freshQuestion = pickedFresh[index];
+    if (reviewQuestion) mixed.push(reviewQuestion);
+    if (freshQuestion) mixed.push(freshQuestion);
+  }
+  return mixed;
+}
+
 function shuffle<T>(list: T[]): T[] {
   const copy = [...list];
   for (let index = copy.length - 1; index > 0; index -= 1) {
@@ -89,7 +122,7 @@ function restoreSession(saved: PracticeSession): PracticeSession {
   return {
     ...saved,
     sessionId: saved.sessionId || `legacy-${saved.startedAt}`,
-    source: saved.source === "mistakes" ? "mistakes" : "bank",
+    source: saved.source === "mistakes" || saved.source === "mixed" ? saved.source : "bank",
   };
 }
 
@@ -119,6 +152,7 @@ export function PracticeApp() {
   });
   const [attempts, setAttempts] = useState<AttemptSummary[]>([]);
   const [recordNote, setRecordNote] = useState<string | null>(null);
+  const [masteryNote, setMasteryNote] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const hydrated = useRef(false);
 
@@ -326,6 +360,18 @@ export function PracticeApp() {
         setError("错题库里的题目已经不在这科题库中。重新导入 PDF 后再练。");
         return;
       }
+    } else if (source === "mixed") {
+      const pool = bankQuestions.filter((question) => nextFilter === "all" || question.type === nextFilter);
+      if (pool.length === 0) {
+        setError(
+          bankQuestions.length === 0
+            ? `「${subjectShort(nextSubject)}」还没有题目。先上传对应的《600母题》PDF。`
+            : "这个题型下没有题目。可以改成「全部」再开始。",
+        );
+        return;
+      }
+      const mistakeIds = new Set(mistakes[nextSubject].map((item) => item.question.id));
+      ordered = mixWithMistakes(pool, mistakeIds, nextLimit === "all" ? pool.length : nextLimit, shuffleOn);
     } else {
       const pool = bankQuestions.filter((question) => nextFilter === "all" || question.type === nextFilter);
       if (pool.length === 0) {
@@ -348,6 +394,7 @@ export function PracticeApp() {
     setError(null);
     setNotice(null);
     setRecordNote(null);
+    setMasteryNote(null);
     setPaused(null);
     setSession({
       sessionId: crypto.randomUUID(),
@@ -392,8 +439,17 @@ export function PracticeApp() {
         body: JSON.stringify({ sessionId: current.sessionId, questionId, selected }),
       });
       if (!response.ok) throw new Error("record");
+      const payload = (await response.json()) as {
+        mastery?: { questionId: string; correctStreak: number; removed: boolean }[];
+      };
+      const hit = payload.mastery?.find((item) => item.questionId === questionId);
+      if (hit?.removed) setMasteryNote("这道错题已连续做对 3 次，已移出错题库。");
+      else if (hit && hit.correctStreak > 0) {
+        setMasteryNote(`这道错题已连续做对 ${hit.correctStreak}/3，再对 ${3 - hit.correctStreak} 次就移出。`);
+      } else setMasteryNote(null);
       setRecordNote(null);
       setDatabaseDown(false);
+      void refreshRecords();
     } catch {
       setDatabaseDown(true);
       setRecordNote("这道题先留在本次练习里，交卷时会写入错题库。");
@@ -573,6 +629,7 @@ export function PracticeApp() {
           session={session}
           questions={banks[session.subject].questions}
           recordNote={recordNote}
+          masteryNote={masteryNote}
           onChange={setSession}
           onExit={leaveSession}
           onRecord={(questionId, selected) => void recordSelection(session, questionId, selected)}
@@ -649,6 +706,14 @@ export function PracticeApp() {
               onFile={(file) => void ingest(file)}
               onDrag={setDragging}
               onStart={() => beginPractice()}
+              onMix={() => beginPractice(subject, filter, limit, "mixed")}
+              mistakeCount={
+                bank.questions.filter(
+                  (question) =>
+                    (filter === "all" || question.type === filter) &&
+                    mistakes[subject].some((item) => item.question.id === question.id),
+                ).length
+              }
               onClear={() => void removeBank()}
             />
           ) : null}
@@ -685,6 +750,8 @@ function HomeView({
   onFile,
   onDrag,
   onStart,
+  onMix,
+  mistakeCount,
   onClear,
 }: {
   subject: SubjectId;
@@ -703,6 +770,8 @@ function HomeView({
   onFile: (file: File) => void;
   onDrag: (dragging: boolean) => void;
   onStart: () => void;
+  onMix: () => void;
+  mistakeCount: number;
   onClear: () => void;
 }) {
   const stats = bank.meta?.stats;
@@ -738,6 +807,12 @@ function HomeView({
               <BookOpen />
               开始练习{available > 0 ? `（${planned} 题）` : ""}
             </Button>
+            <Button type="button" variant="secondary" className="h-11" disabled={available === 0 || parsing} onClick={onMix}>
+              错题混练{available > 0 ? `（${planned} 题）` : ""}
+            </Button>
+            <p className="text-xs leading-5 text-muted-foreground">
+              错题混练把还在错题库里的题和没错过的新题抽在一组。当前范围内有 {mistakeCount} 道错题，连续做对 3 次才移出，中途再错就重新计数。
+            </p>
             {stats ? (
               <Button type="button" variant="ghost" onClick={onClear}>
                 清空这一科
@@ -857,6 +932,7 @@ function SessionView({
   session,
   questions,
   recordNote,
+  masteryNote,
   onChange,
   onExit,
   onRecord,
@@ -866,6 +942,7 @@ function SessionView({
   session: PracticeSession;
   questions: Question[];
   recordNote: string | null;
+  masteryNote: string | null;
   onChange: (session: PracticeSession) => void;
   onExit: () => void;
   onRecord: (questionId: string, selected: string) => void;
@@ -982,6 +1059,7 @@ function SessionView({
           <Badge variant="secondary">{subjectShort(session.subject)}</Badge>
           <Badge variant="outline">{session.review ? "错题回看" : typeLabel(question.type)}</Badge>
           {session.source === "mistakes" ? <Badge variant="outline">错题练习</Badge> : null}
+          {session.source === "mixed" ? <Badge variant="outline">错题混练</Badge> : null}
         </div>
         <Button type="button" variant="ghost" onClick={onExit}>
           返回题库
@@ -1055,6 +1133,11 @@ function SessionView({
         </CardContent>
       </Card>
 
+      {masteryNote ? (
+        <p className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-sm" role="status">
+          {masteryNote}
+        </p>
+      ) : null}
       {recordNote ? (
         <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive" role="status">
           {recordNote}
@@ -1322,7 +1405,8 @@ function SummaryView({
   const accuracy = summary.graded === 0 ? null : (summary.correct / summary.graded) * 100;
   const filterText =
     session.filter === "all" ? "全部题型" : session.filter === "single" ? "只练单选" : "只练多选";
-  const sourceText = session.source === "mistakes" ? "错题练习" : "题库练习";
+  const sourceText =
+    session.source === "mistakes" ? "错题练习" : session.source === "mixed" ? "错题混练" : "题库练习";
 
   return (
     <div className="flex flex-col gap-4">
@@ -1340,7 +1424,7 @@ function SummaryView({
             <Stat label="错题" value={`${summary.wrong}`} />
           </div>
           <p className="text-sm leading-6 text-muted-foreground">
-            有标准答案的题才计入得分，未作答按错误计算。多选题必须与答案完全一致。答错和交卷时未作答的题会进入错题库，之后做对一次就移出。这次成绩会留在历史记录里。
+            有标准答案的题才计入得分，未作答按错误计算。多选题必须与答案完全一致。答错和交卷时未作答的题会进入错题库，连续做对 3 次才移出，中途再错就重新计数。这次成绩会留在历史记录里。
             {summary.ungraded > 0
               ? ` 另有 ${summary.ungraded} 道题 PDF 中未识别到答案，没有算进正确率。`
               : ""}
