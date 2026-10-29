@@ -1,5 +1,5 @@
 import { normalizeSelected } from "@/lib/grade";
-import type { BankMeta, Choice, ParseStats, Question, SubjectId } from "@/lib/types";
+import type { BankMeta, Choice, MistakeBackup, MistakeRecord, ParseStats, Question, SubjectId } from "@/lib/types";
 
 export function jsonError(message: string, status: number) {
   return Response.json({ error: message }, { status });
@@ -128,4 +128,66 @@ export function readIdList(value: unknown): string[] | null {
     return null;
   }
   return value;
+}
+
+export function readMistakeBackup(value: unknown): MistakeBackup | null {
+  if (!value || typeof value !== "object") return null;
+  const backup = value as { kind?: unknown; version?: unknown; exportedAt?: unknown; items?: unknown };
+  if (backup.kind !== "erzao-mistakes" || backup.version !== 1) return null;
+  if (!Array.isArray(backup.items) || backup.items.length > 2000) return null;
+  const items: MistakeRecord[] = [];
+  for (const raw of backup.items) {
+    const item = readMistakeItem(raw);
+    if (!item) return null;
+    items.push(item);
+  }
+  return {
+    kind: "erzao-mistakes",
+    version: 1,
+    exportedAt: typeof backup.exportedAt === "number" && Number.isFinite(backup.exportedAt) ? backup.exportedAt : Date.now(),
+    items,
+  };
+}
+
+function readMistakeItem(value: unknown): MistakeRecord | null {
+  if (!value || typeof value !== "object") return null;
+  const item = value as {
+    question?: unknown;
+    wrongCount?: unknown;
+    correctStreak?: unknown;
+    lastSelected?: unknown;
+    lastWrongAt?: unknown;
+    events?: unknown;
+  };
+  if (!item.question || typeof item.question !== "object") return null;
+  const subject = (item.question as { subject?: unknown }).subject;
+  if (subject !== "civil" && subject !== "management") return null;
+  if (!isQuestion(item.question, subject)) return null;
+  if (!Number.isInteger(item.wrongCount) || (item.wrongCount as number) < 1 || (item.wrongCount as number) > 100000) {
+    return null;
+  }
+  if (!Number.isInteger(item.correctStreak) || (item.correctStreak as number) < 0 || (item.correctStreak as number) > 2) {
+    return null;
+  }
+  const lastSelected = normalizeSelected(item.lastSelected);
+  if (lastSelected === null) return null;
+  if (typeof item.lastWrongAt !== "number" || !Number.isFinite(item.lastWrongAt)) return null;
+  if (!Array.isArray(item.events) || item.events.length > 20) return null;
+  const events: MistakeRecord["events"] = [];
+  for (const rawEvent of item.events) {
+    if (!rawEvent || typeof rawEvent !== "object") return null;
+    const event = rawEvent as { selected?: unknown; createdAt?: unknown };
+    const selected = normalizeSelected(event.selected);
+    if (selected === null) return null;
+    if (typeof event.createdAt !== "number" || !Number.isFinite(event.createdAt)) return null;
+    events.push({ selected, createdAt: event.createdAt });
+  }
+  return {
+    question: item.question,
+    wrongCount: item.wrongCount as number,
+    correctStreak: item.correctStreak as number,
+    lastSelected,
+    lastWrongAt: item.lastWrongAt,
+    events,
+  };
 }

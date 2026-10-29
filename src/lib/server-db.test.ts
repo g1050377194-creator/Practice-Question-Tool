@@ -13,6 +13,8 @@ import {
   readBanks,
   recordAnswers,
   replaceBank,
+  exportMistakeBackup,
+  importMistakeBackup,
   type ExamDB,
 } from "./server-db";
 import type { BankMeta, Question } from "./types";
@@ -145,4 +147,28 @@ test("重新导入题库时，已经不在卷子里的错题会被清掉", () =>
   assert.equal(readBanks(db).civil.questions.length, 0);
   assert.equal(listMistakes(db).civil.length, 0);
   db.close();
+});
+
+test("导出错题库后可以导入到空数据库，并恢复题目和连续做对次数", () => {
+  const source = tempDatabase();
+  const first = question("civil:1:single:a:0", "A", 1);
+  replaceBank(source, meta(), [first]);
+  recordAnswers(source, "session-export", [{ questionId: first.id, selected: "B" }]);
+  recordAnswers(source, "session-export-ok", [{ questionId: first.id, selected: "A" }]);
+  const backup = exportMistakeBackup(source, 20);
+  assert.equal(backup.items.length, 1);
+  assert.equal(backup.items[0]?.correctStreak, 1);
+  source.close();
+
+  const target = tempDatabase();
+  const result = importMistakeBackup(target, backup);
+  assert.equal(result.imported, 1);
+  assert.equal(result.skipped, 0);
+  const restored = listMistakes(target).civil;
+  assert.equal(restored.length, 1);
+  assert.equal(restored[0]?.question.stem, "题干 1");
+  assert.equal(restored[0]?.wrongCount, 1);
+  assert.equal(restored[0]?.correctStreak, 1);
+  assert.equal(restored[0]?.events.length, 1);
+  target.close();
 });

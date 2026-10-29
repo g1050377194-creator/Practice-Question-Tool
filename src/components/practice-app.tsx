@@ -545,6 +545,52 @@ export function PracticeApp() {
     }
   }
 
+  async function exportMistakeFile() {
+    try {
+      const response = await fetch("/api/mistakes/export");
+      if (!response.ok) throw new Error("export");
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `错题库-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setError(null);
+      setDatabaseDown(false);
+      setNotice("错题库已导出。请把这个文件保存下来。");
+    } catch {
+      setDatabaseDown(true);
+      setError("错题库没有导出。");
+    }
+  }
+
+  async function importMistakeFile(file: File) {
+    const confirmed = window.confirm("导入会按文件恢复错题。同一道题已有的错过次数和连续做对次数会被覆盖。");
+    if (!confirmed) return;
+    try {
+      const text = await file.text();
+      const response = await fetch("/api/mistakes/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: text,
+      });
+      const payload = (await response.json()) as { imported?: number; skipped?: number; error?: string };
+      if (!response.ok) throw new Error(payload.error || "import");
+      const banksResponse = await fetch("/api/banks");
+      if (banksResponse.ok) {
+        const banksPayload = (await banksResponse.json()) as { banks: Record<SubjectId, BankState> };
+        setBanks(banksPayload.banks);
+      }
+      await refreshRecords();
+      setError(null);
+      setNotice(`已导入 ${payload.imported ?? 0} 道错题。`);
+    } catch (reason) {
+      const message = reason instanceof Error && reason.message !== "import" ? reason.message : "错题库没有导入。";
+      setError(message);
+    }
+  }
+
   async function clearMistakeBank() {
     const count = mistakes[subject].length;
     if (count === 0) return;
@@ -721,9 +767,12 @@ export function PracticeApp() {
             <MistakePanel
               subject={subject}
               mistakes={mistakes[subject]}
+              canExport={mistakes.civil.length + mistakes.management.length > 0}
               onPractice={(questionIds) => beginPractice(subject, "all", "all", "mistakes", questionIds)}
               onDismiss={(questionId) => void dismissOneMistake(questionId)}
               onClear={() => void clearMistakeBank()}
+              onExport={() => void exportMistakeFile()}
+              onImport={(file) => void importMistakeFile(file)}
             />
           ) : null}
           {homeTab === "history" ? <HistoryPanel subject={subject} attempts={attempts} /> : null}

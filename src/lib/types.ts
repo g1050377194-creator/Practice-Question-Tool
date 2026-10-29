@@ -51,14 +51,11 @@ export type MistakeEvent = {
   createdAt: number;
 };
 
-export type MistakeRecord = {
-  question: Question;
-  wrongCount: number;
-  /** 连续做对的次数。满 3 次后移出错题库，中途再错会归零。 */
-  correctStreak: number;
-  lastSelected: string;
-  lastWrongAt: number;
-  events: MistakeEvent[];
+export type MistakeBackup = {
+  kind: "erzao-mistakes";
+  version: 1;
+  exportedAt: number;
+  items: MistakeRecord[];
 };
 
 export type AttemptSummary = {

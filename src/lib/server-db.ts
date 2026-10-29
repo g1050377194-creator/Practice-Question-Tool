@@ -7,6 +7,7 @@ import type {
   AttemptSummary,
   BankMeta,
   Choice,
+  MistakeBackup,
   MistakeRecord,
   ParseStats,
   Question,
@@ -401,6 +402,82 @@ export function clearMistakes(db: ExamDB, subject: SubjectId): void {
     db.prepare("DELETE FROM mistake_events WHERE subject = ?").run(subject);
     db.prepare("DELETE FROM mistakes WHERE subject = ?").run(subject);
   });
+}
+
+export function exportMistakeBackup(db: ExamDB, exportedAt = Date.now()): MistakeBackup {
+  const listed = listMistakes(db);
+  return {
+    kind: "erzao-mistakes",
+    version: 1,
+    exportedAt,
+    items: [...listed.civil, ...listed.management],
+  };
+}
+
+export function importMistakeBackup(db: ExamDB, backup: MistakeBackup): { imported: number; skipped: number } {
+  let imported = 0;
+  let skipped = 0;
+  const insertQuestion = db.prepare(
+    `INSERT INTO questions (
+       id, subject, type, number, sort_order, stem, options_json, answer, explanation
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const upsertMistake = db.prepare(
+    `INSERT INTO mistakes (
+       question_id, subject, wrong_count, correct_streak, last_selected, last_wrong_at, active
+     ) VALUES (?, ?, ?, ?, ?, ?, 1)
+     ON CONFLICT(question_id) DO UPDATE SET
+       subject = excluded.subject,
+       wrong_count = excluded.wrong_count,
+       correct_streak = excluded.correct_streak,
+       last_selected = excluded.last_selected,
+       last_wrong_at = excluded.last_wrong_at,
+       active = 1`,
+  );
+  const deleteEvents = db.prepare("DELETE FROM mistake_events WHERE question_id = ?");
+  const insertEvent = db.prepare(
+    `INSERT INTO mistake_events (session_id, question_id, subject, selected, created_at)
+     VALUES ('import', ?, ?, ?, ?)`,
+  );
+  withTransaction(db, () => {
+    for (const item of backup.items) {
+      const question = item.question;
+      const existing = db.prepare("SELECT subject FROM questions WHERE id = ?").get(question.id) as
+        | { subject: string }
+        | undefined;
+      if (existing && existing.subject !== question.subject) {
+        skipped += 1;
+        continue;
+      }
+      if (!existing) {
+        insertQuestion.run(
+          question.id,
+          question.subject,
+          question.type,
+          question.number,
+          question.order,
+          question.stem,
+          JSON.stringify(question.options),
+          question.answer,
+          question.explanation,
+        );
+      }
+      upsertMistake.run(
+        question.id,
+        question.subject,
+        item.wrongCount,
+        item.correctStreak,
+        item.lastSelected,
+        item.lastWrongAt,
+      );
+      deleteEvents.run(question.id);
+      for (const event of item.events) {
+        insertEvent.run(question.id, question.subject, event.selected, event.createdAt);
+      }
+      imported += 1;
+    }
+  });
+  return { imported, skipped };
 }
 
 export function recordAnswers(

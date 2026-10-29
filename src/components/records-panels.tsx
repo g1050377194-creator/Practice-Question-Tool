@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { subjectLabel, type AttemptDetail, type AttemptSummary, type MistakeRecord, type SubjectId } from "@/lib/types";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 function formatWhen(timestamp: number): string {
   return new Intl.DateTimeFormat("zh-CN", {
@@ -33,17 +33,24 @@ function filterText(filter: AttemptSummary["filter"]): string {
 export function MistakePanel({
   subject,
   mistakes,
+  canExport,
   onPractice,
   onDismiss,
   onClear,
+  onExport,
+  onImport,
 }: {
   subject: SubjectId;
   mistakes: MistakeRecord[];
+  canExport: boolean;
   onPractice: (questionIds: string[]) => void;
   onDismiss: (questionId: string) => void;
   onClear: () => void;
+  onExport: () => void;
+  onImport: (file: File) => void;
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
+  const importRef = useRef<HTMLInputElement>(null);
   const ids = mistakes.map((item) => item.question.id);
 
   return (
@@ -71,7 +78,27 @@ export function MistakePanel({
               清空错题库
             </Button>
           ) : null}
+          <Button type="button" variant="outline" className="h-11" disabled={!canExport} onClick={onExport}>
+            导出错题库
+          </Button>
+          <Button type="button" variant="outline" className="h-11" onClick={() => importRef.current?.click()}>
+            导入错题库
+          </Button>
+          <input
+            ref={importRef}
+            type="file"
+            accept="application/json,.json"
+            className="sr-only"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = "";
+              if (file) onImport(file);
+            }}
+          />
         </div>
+        <p className="text-xs leading-5 text-muted-foreground">
+          导出的文件包含两科还在错题库里的题目、错过次数和连续做对次数。导入会按文件恢复，同一道题已有的记录会被覆盖。
+        </p>
         {mistakes.length > 0 ? (
           <ScrollArea className="h-[32rem]">
             <ul className="flex flex-col gap-3 pr-3">
