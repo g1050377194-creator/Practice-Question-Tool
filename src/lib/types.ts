@@ -51,6 +51,15 @@ export type MistakeEvent = {
   createdAt: number;
 };
 
+export type MistakeRecord = {
+  question: Question;
+  wrongCount: number;
+  correctStreak: number;
+  lastSelected: string;
+  lastWrongAt: number;
+  events: MistakeEvent[];
+};
+
 export type MistakeBackup = {
   kind: "erzao-mistakes";
   version: 1;
